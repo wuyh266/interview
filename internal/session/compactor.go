@@ -37,6 +37,14 @@ func (c StructuredCompactor) Compact(ctx context.Context, window ContextWindow, 
 	}
 	turns := window.History.Turns
 	drop := max(0, len(turns)-availableTurns)
+	if limits.RequireReasoningHistory {
+		for i := len(turns) - 1; i >= drop; i-- {
+			if !turns[i].hasReasoning() {
+				drop = i + 1
+				break
+			}
+		}
+	}
 	next := window
 	next.History.Turns = turns[drop:]
 	if drop == 0 && messageBytes(next) <= limits.MaxContextBytes {
@@ -85,16 +93,32 @@ func messageBytes(window ContextWindow) int {
 	return len(model.MarshalMessages(window.Messages()))
 }
 
+func (turn Turn) hasReasoning() bool {
+	if turn.ReasoningContent == "" {
+		return false
+	}
+	for _, message := range turn.ToolMessages {
+		if message.Role == model.RoleAssistant && message.ReasoningContent == "" {
+			return false
+		}
+	}
+	return true
+}
+
 func (c StructuredCompactor) summarize(ctx context.Context, previous *TaskState, turns []Turn, maxStateBytes int, limits ContextLimits) (*TaskState, error) {
 	if c.Model == nil {
 		return nil, errors.New("context compaction requires a model")
+	}
+	older := ContextWindow{History: History{Turns: turns}}.Messages()
+	for i := range older {
+		older[i].ReasoningContent = ""
 	}
 	input := struct {
 		PreviousState *TaskState      `json:"previous_state"`
 		OlderMessages json.RawMessage `json:"older_messages"`
 	}{
 		PreviousState: previous,
-		OlderMessages: model.MarshalMessages(ContextWindow{History: History{Turns: turns}}.Messages()),
+		OlderMessages: model.MarshalMessages(older),
 	}
 	data, err := json.Marshal(input)
 	if err != nil {

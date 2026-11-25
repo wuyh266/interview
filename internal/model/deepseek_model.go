@@ -18,10 +18,11 @@ const deepSeekURL = "https://api.deepseek.com/chat/completions"
 const deepSeekName = "deepseek-flash"
 
 type deepSeekMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content"`
-	ToolCalls  []deepSeekCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role             string         `json:"role"`
+	Content          string         `json:"content"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	ToolCalls        []deepSeekCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
 }
 
 type deepSeekCall struct {
@@ -64,12 +65,33 @@ func NewDeepSeekModelWithClient(apiKey string, client *http.Client) (*DeepSeekMo
 }
 
 func (m *DeepSeekModel) Chat(ctx context.Context, request ChatRequest) (ChatResponse, error) {
+	messages := encodeDeepSeekMessages(request.Messages)
+	thinking := "enabled"
+	if request.JSONResponse {
+		thinking = "disabled"
+	} else if len(request.Tools) > 0 {
+		// 上游可能在一次工具调用中省略思考文本，此时仍需提交工具结果。
+		for _, message := range messages {
+			if message.Role == RoleAssistant && message.ReasoningContent == "" {
+				thinking = "disabled"
+				break
+			}
+		}
+	}
 	body := map[string]any{
 		"model":      deepSeekName,
-		"messages":   encodeDeepSeekMessages(request.Messages),
-		"thinking":   map[string]string{"type": "disabled"},
+		"messages":   messages,
+		"thinking":   map[string]string{"type": thinking},
 		"stream":     false,
 		"max_tokens": 1024,
+	}
+	if thinking == "enabled" {
+		body["reasoning_effort"] = "low"
+		body["max_tokens"] = 8192
+	} else {
+		for i := range messages {
+			messages[i].ReasoningContent = ""
+		}
 	}
 	if request.JSONResponse {
 		body["response_format"] = map[string]string{"type": "json_object"}
@@ -139,7 +161,10 @@ func (m *DeepSeekModel) Chat(ctx context.Context, request ChatRequest) (ChatResp
 		return ChatResponse{}, errors.New("DeepSeek returned an empty answer")
 	}
 
-	response := ChatResponse{Content: choice.Message.Content}
+	response := ChatResponse{
+		Content:          choice.Message.Content,
+		ReasoningContent: choice.Message.ReasoningContent,
+	}
 	for _, call := range choice.Message.ToolCalls {
 		if call.Type != "function" || strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Function.Name) == "" {
 			return ChatResponse{}, errors.New("DeepSeek returned an invalid tool call")
@@ -154,7 +179,12 @@ func (m *DeepSeekModel) Chat(ctx context.Context, request ChatRequest) (ChatResp
 func encodeDeepSeekMessages(messages []Message) []deepSeekMessage {
 	encoded := make([]deepSeekMessage, 0, len(messages))
 	for _, message := range messages {
-		item := deepSeekMessage{Role: message.Role, Content: message.Content, ToolCallID: message.ToolCallID}
+		item := deepSeekMessage{
+			Role:             message.Role,
+			Content:          message.Content,
+			ReasoningContent: message.ReasoningContent,
+			ToolCallID:       message.ToolCallID,
+		}
 		for _, call := range message.ToolCalls {
 			item.ToolCalls = append(item.ToolCalls, deepSeekCall{
 				ID:   call.ID,
@@ -186,6 +216,7 @@ func UnmarshalMessages(data []byte) ([]Message, error) {
 		message := &messages[i]
 		message.Role = item.Role
 		message.Content = item.Content
+		message.ReasoningContent = item.ReasoningContent
 		message.ToolCallID = item.ToolCallID
 		for _, call := range item.ToolCalls {
 			message.ToolCalls = append(message.ToolCalls, protocol.ToolCall{

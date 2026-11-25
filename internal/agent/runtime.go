@@ -60,7 +60,7 @@ func (r *Runtime) Run(ctx context.Context, input RunInput) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("generate run ID: %w", err)
 	}
 	result := RunResult{RunID: hex.EncodeToString(id[:])}
-	var answer string
+	var completed session.Turn
 	err := r.sessions.Update(ctx, input.Session, func(state *session.Session) error {
 		window := session.ContextWindow{
 			History: session.History{
@@ -79,11 +79,12 @@ func (r *Runtime) Run(ctx context.Context, input RunInput) (RunResult, error) {
 			Turns:          append(past, *window.Current),
 			CompactedTurns: len(past) - len(window.History.Turns),
 		}
-		answer = window.Current.Answer
+		completed = *window.Current
 		return nil
 	})
 	if err == nil {
-		result.Answer = answer
+		result.Answer = completed.Answer
+		result.ReasoningContent = completed.ReasoningContent
 	}
 	return result, err
 }
@@ -95,19 +96,23 @@ func (r *Runtime) runTurn(ctx context.Context, key session.SessionKey, runID str
 	if r.tools != nil {
 		request.Tools = r.tools.Defs()
 	}
+	limits := r.config.ContextLimits
+	if _, deepSeek := r.model.(*model.DeepSeekModel); deepSeek && len(request.Tools) > 0 {
+		limits.RequireReasoningHistory = true
+	}
 	availableTools := make(map[string]struct{}, len(request.Tools))
 	for _, spec := range request.Tools {
 		availableTools[spec.Name] = struct{}{}
 	}
 	//runtime
 	for step := 0; step < r.config.MaxIterations; step++ {
-		compacted, err := r.compactor.Compact(ctx, *window, r.config.ContextLimits)
+		compacted, err := r.compactor.Compact(ctx, *window, limits)
 		if err != nil {
 			return err
 		}
 		*window = compacted
 		request.Messages = window.Messages()
-		stepCtx, cancel := context.WithTimeout(ctx, r.config.ContextLimits.StepTimeout)
+		stepCtx, cancel := context.WithTimeout(ctx, limits.StepTimeout)
 		response, err := r.model.Chat(stepCtx, request)
 		cancel()
 		if err != nil {
@@ -115,11 +120,13 @@ func (r *Runtime) runTurn(ctx context.Context, key session.SessionKey, runID str
 		}
 		if len(response.ToolCalls) == 0 {
 			window.Current.Answer = response.Content
+			window.Current.ReasoningContent = response.ReasoningContent
 			return nil
 		}
 
 		window.Current.ToolMessages = append(window.Current.ToolMessages, model.Message{
-			Role: model.RoleAssistant, Content: response.Content, ToolCalls: response.ToolCalls,
+			Role: model.RoleAssistant, Content: response.Content, ReasoningContent: response.ReasoningContent,
+			ToolCalls: response.ToolCalls,
 		})
 		for _, call := range response.ToolCalls {
 			if err := ctx.Err(); err != nil {

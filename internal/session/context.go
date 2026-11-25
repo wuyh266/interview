@@ -46,9 +46,10 @@ func (h History) RecentTurns(limit int) []Turn {
 }
 
 type Turn struct {
-	UserInput    string          `json:"user_input"`
-	ToolMessages []model.Message `json:"tool_messages,omitempty"` // 按原顺序保存工具调用和结果消息。
-	Answer       string          `json:"answer,omitempty"`
+	UserInput        string          `json:"user_input"`
+	ToolMessages     []model.Message `json:"tool_messages,omitempty"` // 按原顺序保存工具调用和结果消息。
+	Answer           string          `json:"answer,omitempty"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
 }
 
 type ContextWindow struct {
@@ -64,7 +65,9 @@ func (w ContextWindow) Messages() []model.Message {
 	for _, turn := range w.History.Turns {
 		messages = append(messages, model.Message{Role: model.RoleUser, Content: turn.UserInput})
 		messages = append(messages, turn.ToolMessages...)
-		messages = append(messages, model.Message{Role: model.RoleAssistant, Content: turn.Answer})
+		messages = append(messages, model.Message{
+			Role: model.RoleAssistant, Content: turn.Answer, ReasoningContent: turn.ReasoningContent,
+		})
 	}
 	if w.Current != nil {
 		messages = append(messages, model.Message{Role: model.RoleUser, Content: w.Current.UserInput})
@@ -81,9 +84,10 @@ func taskStateMessage(state *TaskState) model.Message {
 }
 
 type ContextLimits struct {
-	MaxHistoryTurns int // 默认及最大值为 20。
-	MaxContextBytes int // 对话消息 JSON 字节上限，不含工具定义，默认 128 KiB。
-	StepTimeout     time.Duration
+	MaxHistoryTurns         int // 默认及最大值为 20。
+	MaxContextBytes         int // 对话消息 JSON 字节上限，不含工具定义，默认 128 KiB。
+	StepTimeout             time.Duration
+	RequireReasoningHistory bool // 对需回传思考文本的请求，先压缩不含该字段的旧轮次。
 }
 
 func (limits ContextLimits) WithDefaults() ContextLimits {

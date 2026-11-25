@@ -21,8 +21,9 @@ type RunInput struct {
 }
 
 type RunResult struct {
-	RunID  string
-	Answer string
+	RunID            string
+	Answer           string
+	ReasoningContent string
 }
 
 // Config 中的各项上限均为正整数。

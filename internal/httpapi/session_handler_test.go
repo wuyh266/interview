@@ -22,10 +22,12 @@ import (
 
 type todoModel struct{}
 
+const todoReasoning = "已收到待办工具结果。"
+
 func (todoModel) Chat(_ context.Context, request model.ChatRequest) (model.ChatResponse, error) {
 	last := request.Messages[len(request.Messages)-1]
 	if last.Role == model.RoleTool {
-		return model.ChatResponse{Content: last.Content}, nil
+		return model.ChatResponse{Content: last.Content, ReasoningContent: todoReasoning}, nil
 	}
 	args := tool.TodoArgs{Action: tool.TodoList}
 	if text, add := strings.CutPrefix(last.Content, "添加待办 "); add {
@@ -84,7 +86,8 @@ func TestSessionAPIIsolatesAndRestoresWindows(t *testing.T) {
 	requestAPI(t, browser, http.MethodPost, firstURL+"/messages", `{"text":"添加待办 查天气"}`, http.StatusOK, &firstReply)
 	requestAPI(t, browser, http.MethodPost, secondURL+"/messages", `{"text":"添加待办 写周报"}`, http.StatusOK, &secondReply)
 	if firstReply.SessionID != first.SessionID || firstReply.RunID == "" || firstReply.Answer != `{"action":"add","text":"查天气"}` ||
-		secondReply.SessionID != second.SessionID || secondReply.Answer != `{"action":"add","text":"写周报"}` {
+		secondReply.SessionID != second.SessionID || secondReply.Answer != `{"action":"add","text":"写周报"}` ||
+		firstReply.ReasoningContent != todoReasoning || secondReply.ReasoningContent != todoReasoning {
 		t.Fatalf("unexpected tool replies: %+v, %+v", firstReply, secondReply)
 	}
 
@@ -107,7 +110,8 @@ func TestSessionAPIIsolatesAndRestoresWindows(t *testing.T) {
 	} {
 		var restored sessionView
 		requestAPI(t, reconnected, http.MethodGet, window.url, "", http.StatusOK, &restored)
-		if restored.SessionID != window.id || len(restored.Turns) != 1 || restored.Turns[0].UserInput != "添加待办 "+window.added {
+		if restored.SessionID != window.id || len(restored.Turns) != 1 || restored.Turns[0].UserInput != "添加待办 "+window.added ||
+			restored.Turns[0].ReasoningContent != todoReasoning {
 			t.Fatalf("unexpected history for %s: %+v", window.id, restored)
 		}
 		var reply messageView

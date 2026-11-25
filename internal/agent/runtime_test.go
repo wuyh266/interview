@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,10 +31,7 @@ type calculatorTools struct {
 }
 
 func (tools calculatorTools) Defs() []protocol.ToolSpec {
-	return []protocol.ToolSpec{{
-		Name:       tool.CalculatorToolName,
-		Parameters: json.RawMessage(`{"type":"object","properties":{"expression":{"type":"string"}}}`),
-	}}
+	return []protocol.ToolSpec{tool.CalculatorTool{}.Spec()}
 }
 
 func (tools calculatorTools) Invoke(_ context.Context, name string, args json.RawMessage) (string, error) {
@@ -61,13 +59,15 @@ type deepSeekTestCall struct {
 	} `json:"function"`
 }
 
-func TestRuntimeUsesDeepSeekJSONModeForCompaction(t *testing.T) {
+func TestRuntimeCompactsHistoryWithoutReasoningBeforeDeepSeekChat(t *testing.T) {
 	var calls int
 	transport := chatRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		defer request.Body.Close()
 		var body struct {
 			ResponseFormat map[string]string `json:"response_format"`
 			Messages       []model.Message   `json:"messages"`
+			Thinking       map[string]string `json:"thinking"`
+			Tools          []json.RawMessage `json:"tools"`
 		}
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
@@ -76,16 +76,16 @@ func TestRuntimeUsesDeepSeekJSONModeForCompaction(t *testing.T) {
 		content := "完成"
 		switch calls {
 		case 1:
-			if body.ResponseFormat != nil || len(body.Messages) != 1 {
+			if body.Thinking["type"] != "enabled" || len(body.Tools) != 1 || body.ResponseFormat != nil || len(body.Messages) != 1 {
 				t.Fatalf("unexpected first chat request: %+v", body)
 			}
 		case 2:
-			if body.ResponseFormat["type"] != "json_object" || len(body.Messages) != 2 || !strings.Contains(body.Messages[1].Content, "撰写报告") {
+			if body.Thinking["type"] != "disabled" || len(body.Tools) != 0 || body.ResponseFormat["type"] != "json_object" || len(body.Messages) != 2 || !strings.Contains(body.Messages[1].Content, "撰写报告") {
 				t.Fatalf("unexpected compaction request: %+v", body)
 			}
 			content = testTaskState
 		case 3:
-			if body.ResponseFormat != nil || len(body.Messages) != 2 || !strings.HasSuffix(body.Messages[0].Content, testTaskState) || body.Messages[1].Content != "继续" {
+			if body.Thinking["type"] != "enabled" || len(body.Tools) != 1 || body.ResponseFormat != nil || len(body.Messages) != 2 || !strings.HasSuffix(body.Messages[0].Content, testTaskState) || body.Messages[1].Content != "继续" {
 				t.Fatalf("unexpected follow-up request: %+v", body)
 			}
 		default:
@@ -99,9 +99,9 @@ func TestRuntimeUsesDeepSeekJSONModeForCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := NewRuntime(chatModel, nil, &session.MemoryStore{}, Config{
+	runtime := NewRuntime(chatModel, calculatorTools{t: t}, &session.MemoryStore{}, Config{
 		MaxIterations: 1,
-		ContextLimits: session.ContextLimits{MaxHistoryTurns: 1, StepTimeout: time.Second},
+		ContextLimits: session.ContextLimits{StepTimeout: time.Second},
 	})
 	for _, input := range []string{"撰写报告", "继续"} {
 		if _, err := runtime.Run(context.Background(), RunInput{Text: input}); err != nil {
@@ -111,9 +111,15 @@ func TestRuntimeUsesDeepSeekJSONModeForCompaction(t *testing.T) {
 	if calls != 3 {
 		t.Fatalf("got %d model requests, want 3", calls)
 	}
+	state, err := runtime.RestoreSession(context.Background(), session.SessionKey{})
+	if err != nil || state.History.CompactedTurns != 1 || len(state.History.Turns) != 2 || state.History.Turns[0].UserInput != "撰写报告" {
+		t.Fatalf("expected the original turn to stay available in the transcript: %+v, %v", state.History, err)
+	}
 }
 
 func TestRuntimeReturnsNativeToolResultsToDeepSeek(t *testing.T) {
+	const toolReasoning = "  Fixture reasoning before tool call.\n"
+	const finalReasoning = "Fixture reasoning before final answer."
 	calls := []struct {
 		id        string
 		name      string
@@ -138,6 +144,11 @@ func TestRuntimeReturnsNativeToolResultsToDeepSeek(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	expectedSpec := tool.CalculatorTool{}.Spec()
+	expectedSchema, err := json.Marshal(expectedSpec.Parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
 	requestCount := 0
 	transport := chatRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requestCount++
@@ -145,20 +156,27 @@ func TestRuntimeReturnsNativeToolResultsToDeepSeek(t *testing.T) {
 
 		var body struct {
 			Messages []struct {
-				Role       string             `json:"role"`
-				Content    string             `json:"content"`
-				ToolCalls  []deepSeekTestCall `json:"tool_calls"`
-				ToolCallID string             `json:"tool_call_id"`
+				Role             string             `json:"role"`
+				Content          string             `json:"content"`
+				ReasoningContent string             `json:"reasoning_content"`
+				ToolCalls        []deepSeekTestCall `json:"tool_calls"`
+				ToolCallID       string             `json:"tool_call_id"`
 			} `json:"messages"`
 			Tools []struct {
 				Type     string            `json:"type"`
 				Function protocol.ToolSpec `json:"function"`
 			} `json:"tools"`
+			ToolChoice string            `json:"tool_choice"`
+			Thinking   map[string]string `json:"thinking"`
 		}
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if len(body.Tools) != 1 || body.Tools[0].Type != "function" || body.Tools[0].Function.Name != tool.CalculatorToolName {
+		if body.Thinking["type"] != "enabled" || body.ToolChoice != "auto" || len(body.Tools) != 1 || body.Tools[0].Type != "function" {
+			t.Fatalf("unexpected tool request: %+v", body)
+		}
+		definition := body.Tools[0].Function
+		if definition.Name != expectedSpec.Name || definition.Description != expectedSpec.Description || !bytes.Equal(definition.Parameters, expectedSchema) {
 			t.Fatalf("unexpected tool definitions: %+v", body.Tools)
 		}
 
@@ -168,13 +186,14 @@ func TestRuntimeReturnsNativeToolResultsToDeepSeek(t *testing.T) {
 			if len(body.Messages) != 1 || body.Messages[0].Role != model.RoleUser || body.Messages[0].Content != "6*7 等于多少？" {
 				t.Fatalf("unexpected first messages: %+v", body.Messages)
 			}
-			response = `{"choices":[{"finish_reason":"tool_calls","message":{"content":null,"tool_calls":` + string(encodedCalls) + `}}]}`
+			reasoning, _ := json.Marshal(toolReasoning)
+			response = `{"choices":[{"finish_reason":"tool_calls","message":{"content":null,"reasoning_content":` + string(reasoning) + `,"tool_calls":` + string(encodedCalls) + `}}]}`
 		case 2:
 			if len(body.Messages) != 2+len(calls) {
 				t.Fatalf("expected user, assistant and %d tool messages, got %+v", len(calls), body.Messages)
 			}
 			assistant := body.Messages[1]
-			if assistant.Role != model.RoleAssistant || len(assistant.ToolCalls) != len(calls) {
+			if assistant.Role != model.RoleAssistant || assistant.ReasoningContent != toolReasoning || len(assistant.ToolCalls) != len(calls) {
 				t.Fatalf("assistant does not carry the original calls: %+v", assistant)
 			}
 			for i, call := range calls {
@@ -191,7 +210,18 @@ func TestRuntimeReturnsNativeToolResultsToDeepSeek(t *testing.T) {
 					t.Errorf("unexpected tool result for %s: %+v", call.id, result)
 				}
 			}
-			response = `{"choices":[{"finish_reason":"stop","message":{"content":"答案是 42。"}}]}`
+			reasoning, _ := json.Marshal(finalReasoning)
+			response = `{"choices":[{"finish_reason":"stop","message":{"content":"答案是 42。","reasoning_content":` + string(reasoning) + `}}]}`
+		case 3:
+			if len(body.Messages) != 4+len(calls) {
+				t.Fatalf("restored request lost message history: %+v", body.Messages)
+			}
+			assistant := body.Messages[1]
+			answer := body.Messages[len(body.Messages)-2]
+			if assistant.ReasoningContent != toolReasoning || answer.Role != model.RoleAssistant || answer.Content != "答案是 42。" || answer.ReasoningContent != finalReasoning {
+				t.Fatalf("restored request lost reasoning: %+v", body.Messages)
+			}
+			response = `{"choices":[{"finish_reason":"stop","message":{"content":"刚才的答案是 42。"}}]}`
 		default:
 			t.Fatalf("unexpected model request %d", requestCount)
 		}
@@ -202,10 +232,18 @@ func TestRuntimeReturnsNativeToolResultsToDeepSeek(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := NewRuntime(chatModel, calculatorTools{t: t}, &session.MemoryStore{}, Config{
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sessions.sqlite3")
+	store, err := session.OpenSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	config := Config{
 		MaxIterations: 2,
 		ContextLimits: session.ContextLimits{StepTimeout: time.Second},
-	})
+	}
+	runtime := NewRuntime(chatModel, calculatorTools{t: t}, store, config)
 	var logs bytes.Buffer
 	recorder, ok := runtime.trace.(trace.LogTraceRecorder)
 	if !ok {
@@ -214,15 +252,16 @@ func TestRuntimeReturnsNativeToolResultsToDeepSeek(t *testing.T) {
 	recorder.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	runtime.trace = recorder
 
-	result, err := runtime.Run(context.Background(), RunInput{
-		Session: session.SessionKey{UserID: "user-1", SessionID: "session-1"},
+	key := session.SessionKey{UserID: "user-1", SessionID: "session-1"}
+	result, err := runtime.Run(ctx, RunInput{
+		Session: key,
 		Text:    "6*7 等于多少？",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Answer != "答案是 42。" || requestCount != 2 {
-		t.Fatalf("got answer %q after %d requests", result.Answer, requestCount)
+	if result.Answer != "答案是 42。" || result.ReasoningContent != finalReasoning || requestCount != 2 {
+		t.Fatalf("got %+v after %d requests", result, requestCount)
 	}
 	if result.RunID == "" {
 		t.Fatal("run did not return an ID")
@@ -267,5 +306,18 @@ func TestRuntimeReturnsNativeToolResultsToDeepSeek(t *testing.T) {
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		t.Errorf("expected exactly %d tool trace entries, got %v", len(calls), err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := session.OpenSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	runtime = NewRuntime(chatModel, calculatorTools{t: t}, reopened, config)
+	followUp, err := runtime.Run(ctx, RunInput{Session: key, Text: "刚才答案是多少？"})
+	if err != nil || followUp.Answer != "刚才的答案是 42。" || requestCount != 3 {
+		t.Fatalf("follow-up after reopening SQLite returned %+v, %v after %d requests", followUp, err, requestCount)
 	}
 }

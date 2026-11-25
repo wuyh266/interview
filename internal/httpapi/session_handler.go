@@ -31,8 +31,9 @@ type sessionHandler struct {
 }
 
 type turnView struct {
-	UserInput string `json:"user_input"`
-	Answer    string `json:"answer"`
+	UserInput        string `json:"user_input"`
+	Answer           string `json:"answer"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type sessionView struct {
@@ -41,9 +42,10 @@ type sessionView struct {
 }
 
 type messageView struct {
-	SessionID string `json:"session_id"`
-	RunID     string `json:"run_id"`
-	Answer    string `json:"answer"`
+	SessionID        string `json:"session_id"`
+	RunID            string `json:"run_id"`
+	Answer           string `json:"answer"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // NewHandler 提供会话创建、恢复和续聊的 HTTP 接口。
@@ -98,7 +100,9 @@ func (h sessionHandler) restore(w http.ResponseWriter, r *http.Request) {
 	}
 	view := sessionView{SessionID: key.SessionID, Turns: make([]turnView, 0, len(state.History.Turns))}
 	for _, turn := range state.History.Turns {
-		view.Turns = append(view.Turns, turnView{UserInput: turn.UserInput, Answer: turn.Answer})
+		view.Turns = append(view.Turns, turnView{
+			UserInput: turn.UserInput, Answer: turn.Answer, ReasoningContent: turn.ReasoningContent,
+		})
 	}
 	writeJSON(w, http.StatusOK, view)
 }
@@ -148,7 +152,9 @@ func (h sessionHandler) message(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "agent could not complete the message")
 		return
 	}
-	writeJSON(w, http.StatusOK, messageView{SessionID: key.SessionID, RunID: result.RunID, Answer: result.Answer})
+	writeJSON(w, http.StatusOK, messageView{
+		SessionID: key.SessionID, RunID: result.RunID, Answer: result.Answer, ReasoningContent: result.ReasoningContent,
+	})
 }
 
 func (h sessionHandler) load(w http.ResponseWriter, r *http.Request) (session.SessionKey, session.Session, bool) {

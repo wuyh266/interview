@@ -16,9 +16,10 @@ type sqliteSnapshot struct {
 }
 
 type sqliteTurn struct {
-	UserInput    string          `json:"user_input"`
-	ToolMessages json.RawMessage `json:"tool_messages,omitempty"`
-	Answer       string          `json:"answer"`
+	UserInput        string          `json:"user_input"`
+	ToolMessages     json.RawMessage `json:"tool_messages,omitempty"`
+	Answer           string          `json:"answer"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
 }
 
 func encodeSnapshot(state Session) ([]byte, error) {
@@ -28,7 +29,9 @@ func encodeSnapshot(state Session) ([]byte, error) {
 		ToolState:      state.ToolState,
 	}
 	for _, turn := range state.History.Turns {
-		stored := sqliteTurn{UserInput: turn.UserInput, Answer: turn.Answer}
+		stored := sqliteTurn{
+			UserInput: turn.UserInput, Answer: turn.Answer, ReasoningContent: turn.ReasoningContent,
+		}
 		if len(turn.ToolMessages) > 0 {
 			// 工具参数使用模型消息中的字符串格式，保留模型发出的无效 JSON。
 			stored.ToolMessages = model.MarshalMessages(turn.ToolMessages)
@@ -54,7 +57,9 @@ func decodeSnapshot(data []byte) (Session, error) {
 		ToolState: snapshot.ToolState,
 	}
 	for _, stored := range snapshot.Turns {
-		turn := Turn{UserInput: stored.UserInput, Answer: stored.Answer}
+		turn := Turn{
+			UserInput: stored.UserInput, Answer: stored.Answer, ReasoningContent: stored.ReasoningContent,
+		}
 		if len(stored.ToolMessages) > 0 {
 			messages, err := model.UnmarshalMessages(stored.ToolMessages)
 			if err != nil {

@@ -38,7 +38,7 @@ go run ./cmd '用 todo 工具列出当前会话的待办'
 | [`frontend`](frontend/) | 提供会话列表、新建会话、消息发送和历史恢复。浏览器本地存储保存会话索引、标题和更新时间 |
 | [`internal/httpapi`](internal/httpapi/session_handler.go) | 提供会话接口，使用浏览器 Cookie 验证会话归属 |
 | [`internal/agent`](internal/agent/runtime.go) | 组织 Agent 循环、限制迭代次数、校验并执行工具调用、提交成功完成的轮次 |
-| [`internal/model`](internal/model/deepseek_model.go) | 请求 DeepSeek Chat Completions，解析最终答复 `content` 和原生 `tool_calls` |
+| [`internal/model`](internal/model/deepseek_model.go) | 请求 DeepSeek Chat Completions，解析 `content`、`reasoning_content` 和原生 `tool_calls` |
 | [`internal/tool`](internal/tool/tool_registry.go) | 注册工具的名称、描述和参数 JSON Schema，按名称分派执行 |
 | [`internal/session`](internal/session/) | 读写 SQLite 会话快照，构建模型消息并压缩超出预算的历史 |
 
@@ -57,6 +57,8 @@ go run ./cmd '用 todo 工具列出当前会话的待办'
 | `POST /api/sessions/{sessionID}/messages` | 接收 `{"text":"..."}`，运行 Agent 并返回 `session_id`、`run_id` 和 `answer` |
 
 SQLite 的 `sessions` 表以 `(user_id, session_id)` 为主键。同一浏览器新建的会话有各自的历史、摘要和待办。进程内按会话串行执行轮次，写入时通过 `revision` 检查并发更新，避免覆盖已提交的结果。
+
+普通对话请求默认开启 DeepSeek 思考模式。服务端把 `reasoning_content` 保存在对应的助手消息和 SQLite 会话快照中，供工具执行后的下一次请求和恢复后的续聊使用。发送消息与恢复会话的接口会在有内容时用 `reasoning_content` 返回最终答复对应的思考文本。已有的无思考字段轮次会在续聊时合并进会话摘要。
 
 ## Memory 的召回时机与放置方式
 
